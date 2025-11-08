@@ -70,7 +70,7 @@ def check_system_updates() -> list[str]:
     pm_family = get_package_manager()
     distro_name = get_distro_pretty_name()
     if not pm_family:
-        return ["⚠️ **Помилка:** Не вдалося визначити пакетний менеджер."]
+        return ["⚠️ Помилка: Не вдалося визначити пакетний менеджер."]
     distro_commands = {
         "pacman": ["checkupdates"],
         "dnf": ["dnf", "check-update"],
@@ -116,8 +116,8 @@ def check_system_updates() -> list[str]:
         if pm_family == "apt" and output.startswith("Listing..."):
             output = "\n".join(output.split("\n")[1:])
         if not output.strip():
-            return [f"✅ **Система ({distro_name}) оновлена.** Нових пакетів немає."]
-        header = f"✅ **Доступні оновлення для {distro_name}:**\n\n"
+            return [f"✅ Система ({distro_name}) оновлена. Нових пакетів немає."]
+        header = f"✅ Доступні оновлення для {distro_name}:\n\n"
         full_message = header + "```\n" + output + "\n```"
         if len(full_message) <= TELEGRAM_MAX_LEN:
             return [full_message]
@@ -134,9 +134,9 @@ def check_system_updates() -> list[str]:
         messages.append(current_chunk)
         return messages
     except FileNotFoundError:
-        return [f"⚠️ **Помилка:** команда '{command[0]}' не знайдена."]
+        return [f"⚠️ Помилка: команда '{command[0]}' не знайдена."]
     except subprocess.CalledProcessError as e:
-        return [f"⚠️ **Помилка під час перевірки оновлень:**\n`{e.stderr}`"]
+        return [f"⚠️ Помилка під час перевірки оновлень:\n{e.stderr}"]
 
 
 def run_system_upgrade(password: str) -> (bool, str): # type: ignore
@@ -160,12 +160,12 @@ def run_system_upgrade(password: str) -> (bool, str): # type: ignore
         )
         return (True, result.stdout or "Оновлення успішно завершено.")
     except subprocess.TimeoutExpired:
-        return (False, "❌ **Помилка:** Час очікування оновлення вичерпано.")
+        return (False, "❌ Помилка: Час очікування оновлення вичерпано.")
     except subprocess.CalledProcessError as e:
         error_output = e.stderr or e.stdout
         if "Sorry, try again" in error_output:
-            return (False, "❌ **Невірний пароль sudo!**")
-        error_message = f"**STDOUT:**\n{e.stdout}\n**STDERR:**\n{e.stderr}"
+            return (False, "❌ Невірний пароль sudo!")
+        error_message = f"STDOUT:\n{e.stdout}\nSTDERR:\n{e.stderr}"
         return (False, error_message)
 
 
@@ -183,11 +183,11 @@ def reboot_system(password: str) -> (bool, str): # type: ignore
     except subprocess.TimeoutExpired:
         return (
             False,
-            "❌ **Помилка:** Час очікування команди перезавантаження вичерпано.",
+            "❌ Помилка: Час очікування команди перезавантаження вичерпано.",
         )
     except subprocess.CalledProcessError as e:
         if "Sorry, try again" in e.stderr:
-            return (False, "❌ **Невірний пароль sudo!**")
+            return (False, "❌ Невірний пароль sudo!")
         return (False, f"Помилка при перезавантаженні:\n{e.stderr}")
 
 
@@ -228,7 +228,7 @@ async def send_welcome(message: types.Message, state: FSMContext):
     await state.clear()
     distro_name = get_distro_pretty_name()
     await message.answer(
-        f"👋 **Привіт, {message.from_user.full_name}!**\nЯ бот для моніторингу твоєї системи **{distro_name}**.",
+        f"👋 Привіт, {message.from_user.full_name}!\nЯ бот для моніторингу твоєї системи {distro_name}.",
         reply_markup=get_main_keyboard(),
     )
 
@@ -243,32 +243,32 @@ async def handle_password(message: Message, state: FSMContext):
     current_state = await state.get_state()
     await message.delete()
     if current_state == ActionStates.waiting_for_upgrade_password:
-        await message.answer("⏳ **Пароль отримано. Починаю оновлення...**")
+        await message.answer("⏳ Пароль отримано. Починаю оновлення...")
         success, output = await asyncio.to_thread(run_system_upgrade, password)
         if success:
             await message.answer(
-                "✅ **Систему успішно оновлено!**", parse_mode="Markdown"
+                "✅ Систему успішно оновлено!", parse_mode="Markdown"
             )
             builder = InlineKeyboardBuilder()
             builder.button(text="Так, перезавантажити", callback_data="reboot_yes")
             builder.button(text="Ні, пізніше", callback_data="reboot_no")
             await message.answer(
-                "🔄 **Бажаєте перезавантажити систему зараз?**",
+                "🔄 Бажаєте перезавантажити систему зараз?",
                 reply_markup=builder.as_markup(),
             )
         else:
             await message.answer(
-                f"❌ **Помилка під час оновлення!**\n\n`{output}`",
+                f"❌ Помилка під час оновлення!\n\n{output}",
                 parse_mode="Markdown",
             )
     elif current_state == ActionStates.waiting_for_reboot_password:
         await message.answer(
-            "⏳ **Пароль отримано. Відправляю команду на перезавантаження...**"
+            "⏳ Пароль отримано. Відправляю команду на перезавантаження..."
         )
         success, output = await asyncio.to_thread(reboot_system, password)
         if not success:
             await message.answer(
-                f"❌ **Не вдалося перезавантажити!**\n\n`{output}`",
+                f"❌ Не вдалося перезавантажити!\n\n{output}",
                 parse_mode="Markdown",
             )
     await state.clear()
@@ -283,7 +283,7 @@ async def process_system_upgrade_request(
 ):
     await state.set_state(ActionStates.waiting_for_upgrade_password)
     await callback_query.message.answer(
-        "🔑 **Для оновлення, будь ласка, надішліть ваш `sudo` пароль.**\n\n*Повідомлення буде видалено.*"
+        "🔑 Для оновлення, будь ласка, надішліть ваш sudo пароль.\n\nПовідомлення буде видалено."
     )
     await callback_query.answer()
 
@@ -294,7 +294,7 @@ async def process_reboot_request(
 ):
     await state.set_state(ActionStates.waiting_for_reboot_password)
     await callback_query.message.edit_text(
-        "🔑 **Для перезавантаження, будь ласка, надішліть ваш `sudo` пароль.**\n\n*Повідомлення буде видалено.*",
+        "🔑 Для перезавантаження, будь ласка, надішліть ваш sudo пароль.\n\nПовідомлення буде видалено.",
         reply_markup=None,
     )
     await callback_query.answer()
@@ -340,7 +340,7 @@ async def process_get_logs(callback_query: types.CallbackQuery):
         os.remove(log_file)
     else:
         await callback_query.message.answer(
-            "⚠️ **Помилка:** Не вдалося створити файл з логами."
+            "⚠️ Помилка: Не вдалося створити файл з логами."
         )
 
 
@@ -361,7 +361,7 @@ async def main():
             distro_name = get_distro_pretty_name()
             await bot.send_message(
                 ALLOWED_USER_ID,
-                f"🚀 **Бот для моніторингу {distro_name} запущений!**",
+                f"🚀 Бот для моніторингу {distro_name} запущений!",
                 reply_markup=get_main_keyboard(),
             )
         except Exception as e:
