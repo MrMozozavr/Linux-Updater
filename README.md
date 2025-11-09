@@ -38,8 +38,8 @@
 
 1.  **Клонуйте репозиторій:**
     ```bash
-    git clone https://github.com/ваш-нік/ваш-репозиторій.git
-    cd ваш-репозиторій
+    git clone https://github.com/MrMozozavr/Linux-Updater.git
+    cd Linux-Updater
     ```
 
 2.  **Надайте права на виконання та запустіть інсталяційний скрипт:**
@@ -101,7 +101,7 @@
 3.  Після цього ви можете безпечно видалити папку з проєктом:
     ```bash
     cd ..
-    rm -rf ваш-репозиторій
+    rm -rf Linux-Updater
     ```
 
 ---
