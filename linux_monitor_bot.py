@@ -2,7 +2,9 @@ import asyncio
 import datetime
 import logging
 import os
+import re
 import shutil
+import socket
 import subprocess
 from typing import Union
 
@@ -44,6 +46,7 @@ router = Router()
 class ActionStates(StatesGroup):
     waiting_for_upgrade_password = State()
     waiting_for_reboot_password = State()
+    waiting_for_ssh_password = State()
 
 
 # --- СИСТЕМНІ ФУНКЦІЇ (HELPER) ---
@@ -201,7 +204,7 @@ def check_system_updates() -> list[str]:
         if not output:
             return ["✅ Система оновлена."]
 
-        full_message = f"✅ <b>Оновлення:</b>\n<pre>{output}</pre>"
+        full_message = f"✅ <b>Доступні оновлення:</b>\n<pre>{output}</pre>"
         if len(full_message) <= TELEGRAM_MAX_LEN:
             return [full_message]
         return [
@@ -254,6 +257,43 @@ def reboot_system(password: str) -> (bool, str):  # type: ignore
         return (False, str(e))
 
 
+def manage_ssh_service(password: str, action: str) -> tuple[bool, str]:
+    """
+    Вмикає або вимикає SSH службу (sshd).
+    action має бути 'start' або 'stop'.
+    """
+    if action not in ["start", "stop"]:
+        return (False, "Невідома команда.")
+
+    try:
+        # Використовуємо sudo -S для передачі пароля
+        # systemctl start/stop sshd
+        cmd = ["sudo", "-S", "systemctl", action, "sshd"]
+
+        subprocess.run(
+            cmd,
+            input=password + "\n",
+            check=True,
+            timeout=20,
+            text=True,
+            capture_output=True,
+        )
+
+        # Перевіримо статус після виконання
+        status_cmd = ["systemctl", "is-active", "sshd"]
+        status_res = subprocess.run(status_cmd, capture_output=True, text=True)
+        current_status = status_res.stdout.strip()
+
+        return (True, f"Команду '{action}' виконано.\nСтатус sshd: {current_status}")
+
+    except subprocess.CalledProcessError as e:
+        if "try again" in (e.stderr or ""):
+            return (False, "❌ Невірний пароль sudo!")
+        return (False, f"Помилка виконання:\n{e.stderr}")
+    except Exception as e:
+        return (False, str(e))
+
+
 def get_system_logs(critical_only: bool = False, boot_offset: int = 0) -> str | None:
     boot_desc = "current" if boot_offset == 0 else "previous"
     type_desc = "critical" if critical_only else "all"
@@ -269,38 +309,162 @@ def get_system_logs(critical_only: bool = False, boot_offset: int = 0) -> str | 
         return None
 
 
-# --- ФОНОВЕ ЗАВДАННЯ: SSH МОНІТОРИНГ ---
-async def monitor_ssh_logins(bot: Bot):
-    log_paths = ["/var/log/auth.log", "/var/log/secure"]
-    log_file = None
-    for path in log_paths:
-        if os.path.exists(path):
-            log_file = path
-            break
-
-    if not log_file:
-        return
-
+# --- ДЕТАЛІ ПРИСТРОЮ ---
+async def get_device_hostname(ip: str) -> str:
+    """Спроба дізнатися ім'я хоста (reverse DNS)"""
     try:
-        with open(log_file, "r") as f:
-            f.seek(0, os.SEEK_END)
-            while True:
-                line = f.readline()
-                if not line:
-                    await asyncio.sleep(5)
-                    continue
+        # Запускаємо в окремому потоці, бо gethostbyaddr блокуюча
+        host_info = await asyncio.to_thread(socket.gethostbyaddr, ip)
+        return host_info[0]  # Повертаємо ім'я
+    except Exception:
+        return "Невідомо"
 
-                if "sshd" in line and "Accepted" in line:
-                    try:
-                        await bot.send_message(
-                            ALLOWED_USER_ID,
-                            f"🚨 <b>SSH Alert!</b> Новий вхід:\n<code>{line.strip()}</code>",
-                            parse_mode="HTML",
-                        )
-                    except Exception:
-                        pass
+
+async def get_local_mac(ip: str) -> str:
+    """Шукаємо MAC адресу в ARP таблиці (тільки для локальних)"""
+    try:
+        # Читаємо /proc/net/arp (стандарт Linux)
+        with open("/proc/net/arp", "r") as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) >= 4 and parts[0] == ip:
+                    return parts[3]  # MAC адреса
     except Exception:
         pass
+    return ""
+
+
+async def get_ip_details(ip: str) -> str:
+    """Збирає всю інформацію про IP (Geo + Device Name)"""
+    is_local = ip.startswith(("192.168.", "10.", "172.", "127."))
+
+    # 1. Дізнаємося ім'я пристрою
+    hostname = await get_device_hostname(ip)
+    device_str = f"💻 Пристрій: <code>{hostname}</code>"
+
+    # 2. Якщо локальний - додаємо MAC
+    if is_local:
+        mac = await get_local_mac(ip)
+        if mac:
+            device_str += f"\n🔌 MAC: <code>{mac}</code>"
+        return f"🏠 Локальна мережа\n{device_str}"
+
+    # 3. Якщо зовнішній - пробиваємо GeoIP
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                f"http://ip-api.com/json/{ip}?fields=country,city,isp,org", timeout=5
+            ) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    country = data.get("country", "Невідомо")
+                    city = data.get("city", "")
+                    isp = data.get("isp", data.get("org", "Невідомо"))
+                    return f"🌍 {country}, {city}\n🏢 ISP: {isp}\n{device_str}"
+    except Exception:
+        pass
+
+    return f"🌐 Інфо недоступне\n{device_str}"
+
+
+# --- SSH МОНІТОРИНГ ---
+async def monitor_ssh_logins(bot: Bot):
+    logging.info("🐉 Arch Linux SSH Monitor: ЗАПУЩЕНО")
+    cmd = ["journalctl", "-f", "-n", "0", "-o", "cat"]
+
+    try:
+        process = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        )
+
+        logging.info("✅ Процес journalctl підключено.")
+
+        regex_login = re.compile(
+            r"Accepted\s+(password|publickey)\s+for\s+(\S+)\s+from\s+(\S+)\s+port\s+(\d+)"
+        )
+        regex_logout = re.compile(
+            r"Disconnected\s+from\s+(?:user\s+)?(\S+)\s+(\S+)\s+port\s+(\d+)"
+        )
+
+        while True:
+            line = await process.stdout.readline()
+            if not line:
+                break
+
+            decoded_line = line.decode("utf-8", errors="replace").strip()
+
+            if "ssh" not in decoded_line.lower():
+                continue
+
+            # DEBUG вивід
+            if (
+                "Accepted" in decoded_line
+                or "Disconnected" in decoded_line
+                or "session closed" in decoded_line
+            ):
+                print(f"[DEBUG LOG]: {decoded_line}")
+
+            # === ВХІД ===
+            if "Accepted" in decoded_line:
+                match = regex_login.search(decoded_line)
+                if match:
+                    method, user, ip, port = match.groups()
+
+                    # Отримуємо розширену інфу про пристрій
+                    geo_and_device = await get_ip_details(ip)
+
+                    msg = (
+                        f"🚨 <b>SSH: Вхід (Arch)!</b>\n"
+                        f"👤 Юзер: <code>{user}</code>\n"
+                        f"🔑 Метод: {method}\n"
+                        f"🖥 IP: <code>{ip}</code>\n"
+                        f"{geo_and_device}"
+                    )
+                    try:
+                        await bot.send_message(ALLOWED_USER_ID, msg, parse_mode="HTML")
+                    except Exception as e:
+                        logging.error(f"Send Login Error: {e}")
+
+            # === ВИХІД (Disconnected) ===
+            elif "Disconnected from" in decoded_line:
+                match = regex_logout.search(decoded_line)
+                if match:
+                    user_or_ip = match.group(1)
+                    if user_or_ip.replace(".", "").isdigit():
+                        user = "Невідомо (preauth)"
+                        ip = user_or_ip
+                    else:
+                        user = user_or_ip
+                        ip = match.group(2)
+
+                    msg = (
+                        f"👋 <b>SSH: Відключено</b>\n"
+                        f"👤 Юзер: <code>{user}</code>\n"
+                        f"🖥 IP: <code>{ip}</code>"
+                    )
+                    try:
+                        await bot.send_message(ALLOWED_USER_ID, msg, parse_mode="HTML")
+                    except Exception:
+                        pass
+
+            # === ВИХІД (PAM Session Closed) ===
+            elif "session closed" in decoded_line and "user" in decoded_line:
+                parts = decoded_line.split()
+                if "user" in parts:
+                    try:
+                        user_index = parts.index("user") + 1
+                        if user_index < len(parts):
+                            user = parts[user_index]
+                            await bot.send_message(
+                                ALLOWED_USER_ID,
+                                f"👋 <b>SSH: Сесію завершено</b>\n👤 Юзер: <code>{user}</code>",
+                                parse_mode="HTML",
+                            )
+                    except Exception:
+                        pass
+
+    except Exception as e:
+        logging.error(f"❌ SSH Monitor CRITICAL ERROR: {e}")
 
 
 # --- КЛАВІАТУРИ ---
@@ -308,8 +472,8 @@ def get_main_keyboard():
     builder = InlineKeyboardBuilder()
     builder.button(text="📊 Стан системи", callback_data="sys_dashboard")
     builder.button(text="🚀 Оновити", callback_data="run_upgrade")
-    builder.button(text="⚠️ Failed Services", callback_data="sys_failed")
-    builder.button(text="🔄 Check Updates", callback_data="check_updates")
+    builder.button(text="⚠️ Перевірка сервісів", callback_data="sys_failed")
+    builder.button(text="🔄 Перевірка оновлень", callback_data="check_updates")
     builder.button(text="🌐 Мережа (IP/Ports)", callback_data="net_menu")
     builder.button(text="📄 Логи", callback_data="logs_menu")
     builder.adjust(2, 2, 2)
@@ -318,11 +482,13 @@ def get_main_keyboard():
 
 def get_network_keyboard():
     builder = InlineKeyboardBuilder()
+    builder.button(text="🟢 Start SSH", callback_data="ssh_start")
+    builder.button(text="🔴 Stop SSH", callback_data="ssh_stop")
     builder.button(text="🌍 Зовнішня IP", callback_data="net_ip")
     builder.button(text="🛡 Відкриті порти (Файл)", callback_data="net_ports")
     builder.button(text="🚀 Speedtest", callback_data="net_speed")
     builder.button(text="🔙 Назад", callback_data="menu_main")
-    builder.adjust(1, 1, 1, 1)
+    builder.adjust(2, 1, 1, 1, 1)
     return builder.as_markup()
 
 
@@ -431,6 +597,7 @@ async def process_upgrade(cb: CallbackQuery, state: FSMContext):
 
 @router.message(ActionStates.waiting_for_upgrade_password)
 @router.message(ActionStates.waiting_for_reboot_password)
+@router.message(ActionStates.waiting_for_ssh_password)
 async def handle_password(message: Message, state: FSMContext):
     if not message.text:
         return
@@ -462,6 +629,19 @@ async def handle_password(message: Message, state: FSMContext):
         await wait_msg.delete()
         if not success:
             await message.answer(f"❌ Fail:\n{output}")
+
+    elif current_state == ActionStates.waiting_for_ssh_password:
+        # Отримуємо дію (start/stop), яку ми зберегли раніше
+        data = await state.get_data()
+        action = data.get("ssh_action", "start")
+
+        success, output = await asyncio.to_thread(manage_ssh_service, password, action)
+        await wait_msg.delete()
+
+        if success:
+            await message.answer(f"✅ Успішно:\n{output}")
+        else:
+            await message.answer(f"❌ Помилка:\n{output}")
 
     await state.clear()
 
@@ -503,6 +683,29 @@ async def process_get_logs(cb: CallbackQuery):
         os.remove(log_file)
     else:
         await cb.message.answer("❌ Файл пустий або помилка.")
+
+
+@router.callback_query(F.data.in_({"ssh_start", "ssh_stop"}))
+async def process_ssh_manage(cb: CallbackQuery, state: FSMContext):
+    action = "start" if cb.data == "ssh_start" else "stop"
+
+    # Запам'ятовуємо, яку дію ми хочемо зробити (start чи stop)
+    await state.update_data(ssh_action=action)
+    await state.set_state(ActionStates.waiting_for_ssh_password)
+
+    action_text = "УВІМКНУТИ" if action == "start" else "ВИМКНУТИ"
+    warning = (
+        "\n⚠️ Увага: Якщо ви підключені по SSH, з'єднання розірветься!"
+        if action == "stop"
+        else ""
+    )
+
+    await cb.message.answer(
+        f"🔑 Ви хочете <b>{action_text}</b> SSH.{warning}\n"
+        "Введіть sudo пароль (повідомлення видалиться):",
+        parse_mode="HTML",
+    )
+    await cb.answer()
 
 
 # --- MAIN ---
