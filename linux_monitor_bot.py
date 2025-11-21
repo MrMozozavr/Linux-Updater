@@ -104,10 +104,10 @@ def get_system_dashboard() -> str:
 
     msg = (
         f"📊 <b>Стан системи:</b>\n\n"
-        f"🖥 <b>CPU:</b> {cpu_percent}% (Temp: {temp_str})\n"
-        f"🧠 <b>RAM:</b> {used_mem}GB / {total_mem}GB (Вільн: {free_mem}GB)\n"
-        f"💾 <b>HDD (/):</b> {used_disk}GB / {total_disk}GB ({disk_percent}%)\n"
-        f"⏱ <b>Uptime:</b> {uptime}"
+        f"🖥 <b>Температура та загруженість процесора:</b> {cpu_percent}% (Temp: {temp_str})\n"
+        f"🧠 <b>Використовування оперативної пам'яті:</b> {used_mem}GB / {total_mem}GB (Вільн: {free_mem}GB)\n"
+        f"💾 <b>Кількість місця на диску (/):</b> {used_disk}GB / {total_disk}GB ({disk_percent}%)\n"
+        f"⏱ <b>Час роботи системи:</b> {uptime}"
     )
     return msg
 
@@ -150,7 +150,7 @@ def get_open_ports_file() -> str | None:
             subprocess.run(cmd, stdout=f, text=True, check=True)
         return filename
     except Exception as e:
-        logging.error(f"Port scan error: {e}")
+        logging.error(f"Помилка сканування портів: {e}")
         return None
 
 
@@ -170,12 +170,12 @@ def run_speedtest_cli() -> str:
 
 
 async def get_external_ip() -> str:
-    """Отримує зовнішню IP через API"""
+    """Отримує зовнішній IP через API"""
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get("https://ifconfig.me/ip") as resp:
                 ip = await resp.text()
-                return f"🌍 <b>Зовнішня IP:</b> {ip}"
+                return f"🌍 <b>Зовнішній IP:</b> {ip}"
     except Exception as e:
         return f"❌ Не вдалося отримати IP: {e}"
 
@@ -211,7 +211,7 @@ def check_system_updates() -> list[str]:
         return [f"⚠️ Помилка перевірки оновлень: {e}"]
 
 
-def run_system_upgrade(password: str) -> (bool, str):
+def run_system_upgrade(password: str) -> (bool, str):  # type: ignore
     pm_family = get_package_manager()
     upgrade_commands = {
         "pacman": ["sudo", "-S", "pacman", "-Syu", "--noconfirm"],
@@ -240,7 +240,7 @@ def run_system_upgrade(password: str) -> (bool, str):
         return (False, str(e))
 
 
-def reboot_system(password: str) -> (bool, str):
+def reboot_system(password: str) -> (bool, str):  # type: ignore
     try:
         subprocess.run(
             ["sudo", "-S", "reboot"],
@@ -354,7 +354,9 @@ async def menu_main(cb: CallbackQuery):
 
 @router.callback_query(F.data == "logs_menu")
 async def menu_logs(cb: CallbackQuery):
-    await cb.message.edit_text("Виберіть логи:", reply_markup=get_logs_keyboard())
+    await cb.message.edit_text(
+        "Оберіть потрібні логи:", reply_markup=get_logs_keyboard()
+    )
 
 
 @router.callback_query(F.data == "net_menu")
@@ -378,7 +380,7 @@ async def show_dashboard(cb: CallbackQuery):
 
 @router.callback_query(F.data == "sys_failed")
 async def show_failed_services(cb: CallbackQuery):
-    await cb.answer("Перевіряю services...")
+    await cb.answer("Перевіряю сервіси...")
     msg = await asyncio.to_thread(get_failed_services)
     await cb.message.answer(msg, parse_mode="HTML")
 
@@ -478,7 +480,7 @@ async def reboot_cancel(cb: CallbackQuery):
 
 @router.callback_query(F.data == "check_updates")
 async def check_updates_handler(cb: CallbackQuery):
-    await cb.answer("Checking...")
+    await cb.answer("Перевірка...")
     chunks = await asyncio.to_thread(check_system_updates)
     for chunk in chunks:
         await cb.message.answer(chunk, parse_mode="HTML")
@@ -519,11 +521,11 @@ async def main():
             distro = get_distro_pretty_name()
             await bot.send_message(
                 ALLOWED_USER_ID,
-                f"🚀 Bot Started ({distro})",
+                f"🚀 Ваш помічник в системі {distro} запущений!",
                 reply_markup=get_main_keyboard(),
             )
         except Exception as e:
-            logging.error(f"Startup msg failed: {e}")
+            logging.error(f"Запуск не вдався: {e}")
 
         asyncio.create_task(monitor_ssh_logins(bot))
 
