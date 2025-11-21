@@ -259,37 +259,65 @@ def reboot_system(password: str) -> (bool, str):  # type: ignore
 
 def manage_ssh_service(password: str, action: str) -> tuple[bool, str]:
     """
-    Вмикає або вимикає SSH службу (sshd).
-    action має бути 'start' або 'stop'.
+    action:
+      - 'start': запустити службу
+      - 'stop': зупинити службу
+      - 'kill': примусово розірвати всі активні з'єднання
     """
-    if action not in ["start", "stop"]:
+    if action not in ["start", "stop", "kill"]:
         return (False, "Невідома команда.")
 
     try:
-        # Використовуємо sudo -S для передачі пароля
-        # systemctl start/stop sshd
-        cmd = ["sudo", "-S", "systemctl", action, "sshd"]
+        output_msg = ""
 
-        subprocess.run(
-            cmd,
-            input=password + "\n",
-            check=True,
-            timeout=20,
-            text=True,
-            capture_output=True,
-        )
+        if action == "kill":
+            # ЗМІНИ ТУТ:
+            # 1. Додано '-p', '' -> щоб sudo не писало "[sudo] password for..." у логи
+            # 2. Використовуємо pkill для жорсткого вбивства
+            cmd = ["sudo", "-p", "", "-S", "pkill", "-KILL", "-f", "sshd"]
 
-        # Перевіримо статус після виконання
+            # Запускаємо без check=True, щоб обробити коди виходу вручну
+            res = subprocess.run(
+                cmd, input=password + "\n", text=True, capture_output=True
+            )
+
+            # Код 0 = когось вбили, Код 1 = нікого не знайшли. Обидва варіанти ОК.
+            if res.returncode not in [0, 1]:
+                # Якщо код інший — це реальна помилка.
+                # Але ігноруємо порожній stderr або просто промпт, якщо він проскочив
+                if res.stderr and "password" not in res.stderr.lower():
+                    raise subprocess.CalledProcessError(
+                        res.returncode, cmd, stderr=res.stderr
+                    )
+
+            output_msg = "☠️ Всі активні сесії розірвано."
+
+        else:
+            # start / stop (теж додаємо -p "", щоб прибрати зайвий текст)
+            cmd = ["sudo", "-p", "", "-S", "systemctl", action, "sshd"]
+            subprocess.run(
+                cmd,
+                input=password + "\n",
+                check=True,
+                timeout=20,
+                text=True,
+                capture_output=True,
+            )
+            output_msg = f"Команду '{action}' виконано."
+
+        # Перевіряємо статус служби
         status_cmd = ["systemctl", "is-active", "sshd"]
         status_res = subprocess.run(status_cmd, capture_output=True, text=True)
         current_status = status_res.stdout.strip()
 
-        return (True, f"Команду '{action}' виконано.\nСтатус sshd: {current_status}")
+        return (True, f"{output_msg}\nСтатус служби sshd: {current_status}")
 
     except subprocess.CalledProcessError as e:
-        if "try again" in (e.stderr or ""):
+        # Якщо помилка містить "try again" або "password", значить пароль не підійшов
+        err_text = e.stderr or ""
+        if "try again" in err_text or "incorrect password" in err_text:
             return (False, "❌ Невірний пароль sudo!")
-        return (False, f"Помилка виконання:\n{e.stderr}")
+        return (False, f"Помилка виконання:\n{err_text}")
     except Exception as e:
         return (False, str(e))
 
@@ -484,11 +512,12 @@ def get_network_keyboard():
     builder = InlineKeyboardBuilder()
     builder.button(text="🟢 Start SSH", callback_data="ssh_start")
     builder.button(text="🔴 Stop SSH", callback_data="ssh_stop")
+    builder.button(text="☠️ Kill Active Sessions", callback_data="ssh_kill")  
     builder.button(text="🌍 Зовнішня IP", callback_data="net_ip")
     builder.button(text="🛡 Відкриті порти (Файл)", callback_data="net_ports")
     builder.button(text="🚀 Speedtest", callback_data="net_speed")
     builder.button(text="🔙 Назад", callback_data="menu_main")
-    builder.adjust(2, 1, 1, 1, 1)
+    builder.adjust(2, 1, 2, 1, 1)
     return builder.as_markup()
 
 
@@ -685,26 +714,27 @@ async def process_get_logs(cb: CallbackQuery):
         await cb.message.answer("❌ Файл пустий або помилка.")
 
 
-@router.callback_query(F.data.in_({"ssh_start", "ssh_stop"}))
+@router.callback_query(F.data.in_({"ssh_start", "ssh_stop", "ssh_kill"}))
 async def process_ssh_manage(cb: CallbackQuery, state: FSMContext):
-    action = "start" if cb.data == "ssh_start" else "stop"
+    # Визначаємо дію
+    if cb.data == "ssh_start":
+        action = "start"
+    elif cb.data == "ssh_stop":
+        action = "stop"
+    else:
+        action = "kill"
 
-    # Запам'ятовуємо, яку дію ми хочемо зробити (start чи stop)
     await state.update_data(ssh_action=action)
     await state.set_state(ActionStates.waiting_for_ssh_password)
 
-    action_text = "УВІМКНУТИ" if action == "start" else "ВИМКНУТИ"
-    warning = (
-        "\n⚠️ Увага: Якщо ви підключені по SSH, з'єднання розірветься!"
-        if action == "stop"
-        else ""
-    )
+    if action == "start":
+        text = "🔑 Ви хочете <b>УВІМКНУТИ</b> службу SSH."
+    elif action == "stop":
+        text = "🔑 Ви хочете <b>ЗУПИНИТИ</b> службу SSH.\n(Активні підключення залишаться)."
+    else:
+        text = "⚠️ <b>УВАГА!</b> Ви хочете розірвати <b>ВСІ</b> активні з'єднання!"
 
-    await cb.message.answer(
-        f"🔑 Ви хочете <b>{action_text}</b> SSH.{warning}\n"
-        "Введіть sudo пароль (повідомлення видалиться):",
-        parse_mode="HTML",
-    )
+    await cb.message.answer(f"{text}\nВведіть sudo пароль:", parse_mode="HTML")
     await cb.answer()
 
 
