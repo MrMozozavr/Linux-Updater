@@ -73,7 +73,9 @@ fi
 
 SERVICE_NAME="telegram-linux-monitor.service"
 SERVICE_FILE="/etc/systemd/system/$SERVICE_NAME"
-CURRENT_USER=$(whoami)
+# Отримуємо реального користувача, навіть якщо скрипт запущено через sudo
+REAL_USER=${SUDO_USER:-$(whoami)}
+REAL_GROUP=$(id -gn "$REAL_USER")
 PYTHON_PATH="$VENV_DIR/bin/python"
 SCRIPT_PATH="$PROJECT_DIR/linux_monitor_bot.py"
 
@@ -82,12 +84,13 @@ echo "Створюю файл сервісу systemd..."
 cat << EOF | sudo tee "$SERVICE_FILE" > /dev/null
 [Unit]
 Description=Telegram Bot for Linux System Monitoring
-After=network-online.target
+After=network.target network-online.target
 Wants=network-online.target
 
 [Service]
-User=$CURRENT_USER
-Group=$(id -gn "$CURRENT_USER")
+Type=simple
+User=$REAL_USER
+Group=$REAL_GROUP
 WorkingDirectory=$PROJECT_DIR
 ExecStart=$PYTHON_PATH $SCRIPT_PATH
 Restart=always

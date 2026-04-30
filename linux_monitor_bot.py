@@ -196,7 +196,9 @@ def check_system_updates() -> list[str]:
     }
     command = distro_commands.get(pm_family)
     try:
-        result = subprocess.run(command, capture_output=True, text=True)
+        env = os.environ.copy()
+        env["LANG"] = "C"
+        result = subprocess.run(command, capture_output=True, text=True, env=env)
         output = result.stdout.strip() if result.returncode in [0, 100] else ""
         if pm_family == "apt" and output.startswith("Listing..."):
             output = "\n".join(output.split("\n")[1:])
@@ -219,7 +221,13 @@ def run_system_upgrade(password: str) -> (bool, str):  # type: ignore
     upgrade_commands = {
         "pacman": ["sudo", "-S", "pacman", "-Syu", "--noconfirm"],
         "dnf": ["sudo", "-S", "dnf", "upgrade", "-y"],
-        "apt": ["sudo", "-S", "bash", "-c", "apt update && apt upgrade -y"],
+        "apt": [
+            "sudo",
+            "-S",
+            "bash",
+            "-c",
+            "DEBIAN_FRONTEND=noninteractive apt-get update && DEBIAN_FRONTEND=noninteractive apt-get upgrade -y -q",
+        ],
     }
     command = upgrade_commands.get(pm_family)
     if not command:
