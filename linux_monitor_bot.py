@@ -24,6 +24,10 @@ load_dotenv()
 API_TOKEN = os.getenv("TELEGRAM_API_TOKEN")
 ALLOWED_USER_ID = int(os.getenv("ALLOWED_USER_ID"))
 
+# Примусово додаємо стандартні системні шляхи до PATH,
+# щоб уникнути помилки "[Errno 2] No such file or directory: 'apt-get' / 'systemctl' / 'sudo'"
+os.environ["PATH"] += os.pathsep + "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
 if not API_TOKEN or not ALLOWED_USER_ID:
     raise ValueError(
         "Помилка: Не вдалося завантажити API_TOKEN або ALLOWED_USER_ID з .env файлу."
@@ -374,8 +378,9 @@ async def get_ip_details(ip: str) -> str:
 # --- SSH МОНІТОРИНГ ---
 async def monitor_ssh_logins(bot: Bot):
     logging.info("� Debian/Ubuntu SSH Monitor: ЗАПУЩЕНО")
-    # Читаємо логи (в Debian журнал доступний через journalctl, SSH служба зазвичай log'ає в auth.log або systemd journal)
-    cmd = ["journalctl", "-f", "-n", "0", "-o", "cat"]
+    # Читаємо логи саме демона ssh, бо за замовчуванням звичайний користувач може не бачити всі логи через journalctl
+    # Якщо потрібно, можна додати sudo, але для моніторингу логів ліпше додати юзера в групу adm: "sudo usermod -aG adm $USER"
+    cmd = ["journalctl", "-u", "ssh", "-f", "-n", "0", "-o", "cat"]
 
     try:
         process = await asyncio.create_subprocess_exec(
