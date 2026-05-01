@@ -50,14 +50,6 @@ class ActionStates(StatesGroup):
 
 
 # --- СИСТЕМНІ ФУНКЦІЇ (HELPER) ---
-def get_package_manager() -> str | None:
-    managers = ["pacman", "dnf", "apt"]
-    for m in managers:
-        if shutil.which(m):
-            return m
-    return None
-
-
 def get_distro_pretty_name() -> str:
     try:
         with open("/etc/os-release") as f:
@@ -186,22 +178,16 @@ async def get_external_ip() -> str:
 # --- ІСНУЮЧІ ФУНКЦІЇ ---
 def check_system_updates() -> list[str]:
     TELEGRAM_MAX_LEN = 4000
-    pm_family = get_package_manager()
-    if not pm_family:
-        return ["⚠️ Помилка: Не вдалося визначити пакетний менеджер."]
-    distro_commands = {
-        "pacman": ["checkupdates"],
-        "dnf": ["dnf", "check-update"],
-        "apt": ["apt", "list", "--upgradable"],
-    }
-    command = distro_commands.get(pm_family)
     try:
         env = os.environ.copy()
         env["LANG"] = "C"
-        result = subprocess.run(command, capture_output=True, text=True, env=env)
+        # Оновлюємо кеш (без sudo може не оновити все, але спробуємо)
+        subprocess.run(["apt-get", "update"], capture_output=True, text=True, env=env)
+        result = subprocess.run(["apt", "list", "--upgradable"], capture_output=True, text=True, env=env)
         output = result.stdout.strip() if result.returncode in [0, 100] else ""
-        if pm_family == "apt" and output.startswith("Listing..."):
-            output = "\n".join(output.split("\n")[1:])
+        
+        if output.startswith("Listing..."):
+            output = "\n".join(output.split("\n")[1:]).strip()
 
         if not output:
             return ["✅ Система оновлена."]
@@ -210,30 +196,22 @@ def check_system_updates() -> list[str]:
         if len(full_message) <= TELEGRAM_MAX_LEN:
             return [full_message]
         return [
-            f"✅ Є оновлення (занадто довгий список).\nКількість рядків: {len(output.splitlines())}"
+            f"✅ Є оновлення (занадто довгий список).\nКількість пакетів: {len(output.splitlines())}"
         ]
     except Exception as e:
         return [f"⚠️ Помилка перевірки оновлень: {e}"]
 
 
 def run_system_upgrade(password: str) -> (bool, str):  # type: ignore
-    pm_family = get_package_manager()
-    upgrade_commands = {
-        "pacman": ["sudo", "-S", "pacman", "-Syu", "--noconfirm"],
-        "dnf": ["sudo", "-S", "dnf", "upgrade", "-y"],
-        "apt": [
+    try:
+        command = [
             "sudo",
             "-S",
             "bash",
             "-c",
-            "DEBIAN_FRONTEND=noninteractive apt-get update && DEBIAN_FRONTEND=noninteractive apt-get upgrade -y -q",
-        ],
-    }
-    command = upgrade_commands.get(pm_family)
-    if not command:
-        return (False, "Менеджер не знайдено")
-
-    try:
+            "DEBIAN_FRONTEND=noninteractive apt-get update && DEBIAN_FRONTEND=noninteractive apt-get dist-upgrade -y -q",
+        ]
+        
         result = subprocess.run(
             command,
             capture_output=True,
@@ -279,30 +257,20 @@ def manage_ssh_service(password: str, action: str) -> tuple[bool, str]:
         output_msg = ""
 
         if action == "kill":
-            # ЗМІНИ ТУТ:
-            # 1. Додано '-p', '' -> щоб sudo не писало "[sudo] password for..." у логи
-            # 2. Використовуємо pkill для жорсткого вбивства
             cmd = ["sudo", "-p", "", "-S", "pkill", "-KILL", "-f", "sshd"]
-
-            # Запускаємо без check=True, щоб обробити коди виходу вручну
             res = subprocess.run(
                 cmd, input=password + "\n", text=True, capture_output=True
             )
-
-            # Код 0 = когось вбили, Код 1 = нікого не знайшли. Обидва варіанти ОК.
             if res.returncode not in [0, 1]:
-                # Якщо код інший — це реальна помилка.
-                # Але ігноруємо порожній stderr або просто промпт, якщо він проскочив
                 if res.stderr and "password" not in res.stderr.lower():
                     raise subprocess.CalledProcessError(
                         res.returncode, cmd, stderr=res.stderr
                     )
-
             output_msg = "☠️ Всі активні сесії розірвано."
 
         else:
-            # start / stop (теж додаємо -p "", щоб прибрати зайвий текст)
-            cmd = ["sudo", "-p", "", "-S", "systemctl", action, "sshd"]
+            # На Debian/Ubuntu служба SSH називається 'ssh', а не 'sshd'
+            cmd = ["sudo", "-p", "", "-S", "systemctl", action, "ssh"]
             subprocess.run(
                 cmd,
                 input=password + "\n",
@@ -313,12 +281,12 @@ def manage_ssh_service(password: str, action: str) -> tuple[bool, str]:
             )
             output_msg = f"Команду '{action}' виконано."
 
-        # Перевіряємо статус служби
-        status_cmd = ["systemctl", "is-active", "sshd"]
+        # Перевіряємо статус служби ssh
+        status_cmd = ["systemctl", "is-active", "ssh"]
         status_res = subprocess.run(status_cmd, capture_output=True, text=True)
         current_status = status_res.stdout.strip()
 
-        return (True, f"{output_msg}\nСтатус служби sshd: {current_status}")
+        return (True, f"{output_msg}\nСтатус служби ssh: {current_status}")
 
     except subprocess.CalledProcessError as e:
         # Якщо помилка містить "try again" або "password", значить пароль не підійшов
@@ -405,7 +373,8 @@ async def get_ip_details(ip: str) -> str:
 
 # --- SSH МОНІТОРИНГ ---
 async def monitor_ssh_logins(bot: Bot):
-    logging.info("🐉 Arch Linux SSH Monitor: ЗАПУЩЕНО")
+    logging.info("� Debian/Ubuntu SSH Monitor: ЗАПУЩЕНО")
+    # Читаємо логи (в Debian журнал доступний через journalctl, SSH служба зазвичай log'ає в auth.log або systemd journal)
     cmd = ["journalctl", "-f", "-n", "0", "-o", "cat"]
 
     try:
@@ -450,7 +419,7 @@ async def monitor_ssh_logins(bot: Bot):
                     geo_and_device = await get_ip_details(ip)
 
                     msg = (
-                        f"🚨 <b>SSH: Вхід (Arch)!</b>\n"
+                        f"🚨 <b>SSH: Вхід (Debian/Ubuntu)!</b>\n"
                         f"👤 Юзер: <code>{user}</code>\n"
                         f"🔑 Метод: {method}\n"
                         f"🖥 IP: <code>{ip}</code>\n"
